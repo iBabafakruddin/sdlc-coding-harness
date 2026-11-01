@@ -1,0 +1,47 @@
+{
+  "project": {
+    "name": "my-project",
+    "workspace": ".",
+    "tech_stack": "auto-detect",
+    "commands": {
+      "install": "",
+      "lint": "",
+      "typecheck": "",
+      "test": "",
+      "build": ""
+    }
+  },
+  "git": {
+    "main_branch": "main",
+    "strategy": "feature",
+    "worktree_root": "../{repo}-worktrees",
+    "remote": "origin",
+    "push_branches": false
+  },
+  "team": {
+    "sprint_length_days": 10,
+    "focus_factor": 0.8,
+    "developers": [
+      { "id": "dev-1", "capacity_points": 10, "strengths": ["frontend", "ui"] },
+      { "id": "dev-2", "capacity_points": 10, "strengths": ["backend", "api", "db"] }
+    ]
+  },
+  "workflow": {
+    "pr_mode": "local",
+    "max_review_cycles": 3,
+    "max_qa_cycles": 2,
+    "parallel_developers": true,
+    "human_approval": {
+      "after_grooming": true,
+      "before_merge_to_main": false,
+      "before_qa_release": false
+    }
+  },
+  "quality_gates": {
+    "coverage_min": 80,
+    "max_file_lines": 400,
+    "fail_on_todo": false,
+    "fail_on_debug_statements": true,
+    "extra_commands": []
+  }
+}

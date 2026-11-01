@@ -1,0 +1,21 @@
+node_modules/
+coverage/
+coverage.json
+.coverage
+dist/
+build/
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+
+# >>> sdlc-harness
+# SDLC agent harness runtime data (the board is the team's local Jira)
+.sdlc/board/
+.sdlc/board-backups/
+.sdlc/**/__pycache__/
+*.bak
+# <<< sdlc-harness
