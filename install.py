@@ -1,252 +1,170 @@
 #!/usr/bin/env python3
-"""Install (or upgrade / uninstall) the SDLC agent harness into any project.
-
-    python install.py <target-project-dir>              # install or upgrade
-    python install.py <target-project-dir> --dry-run    # show what would change
-    python install.py <target-project-dir> --force      # also overwrite locally modified harness files
-    python install.py <target-project-dir> --uninstall  # remove harness files you haven't modified
-
-What gets installed into the target:
-    .claude/agents/<role>.md          8 role agents
-    .claude/skills/<skill>/SKILL.md   role + orchestrator skills
-    .sdlc/                            tools, templates, process, config (board/ is created at runtime)
-    CLAUDE.md                         a marked harness block is added/updated (rest of the file untouched)
-    .gitignore                        a marked block ignoring .sdlc/board/
-
-Upgrades are safe: .sdlc/manifest.json records the hash of every installed file. A
-file you changed after install is never overwritten without --force, a file of
-yours with the same name as a harness file is never touched, and .sdlc/config.json
-keeps your values (new default keys are merged in).
 """
-from __future__ import annotations
+Universal Cross-Platform Installer for Lean Parallel SDLC Harness (Windows, macOS, Linux).
+Works on Windows WITHOUT requiring Administrator privileges or Developer Mode:
+  - Attempts native symlinks first
+  - On Windows without symlink privileges, automatically falls back to NTFS Directory Junctions (`mklink /J`)
+    and file hardlinks/copies so Claude Code and Antigravity work out-of-the-box.
 
-import argparse
-import hashlib
-import json
+Usage:
+    python install.py [target_project_dir]
+"""
+
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parent
-VERSION = (SRC / ".sdlc" / "VERSION").read_text(encoding="utf-8").strip()
-MANIFEST = ".sdlc/manifest.json"
-# runtime / per-project files: never copied verbatim
-SKIP = {".sdlc/config.json", ".sdlc/manifest.json", ".sdlc/project-profile.md", ".sdlc/CLAUDE.snippet.md"}
-GITIGNORE_START, GITIGNORE_END = "# >>> sdlc-harness", "# <<< sdlc-harness"
-CLAUDE_START, CLAUDE_END = "<!-- sdlc-harness:start -->", "<!-- sdlc-harness:end -->"
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-
-
-def sha(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-
-
-def harness_files() -> list[str]:
-    files = []
-    for top in (".claude/agents", ".claude/skills", ".sdlc"):
-        for p in sorted((SRC / top).rglob("*")):
-            rel = p.relative_to(SRC).as_posix()
-            if p.is_file() and rel not in SKIP and "/board/" not in f"/{rel}" and "__pycache__" not in rel:
-                files.append(rel)
-    return files
-
-
-def git_out(target: Path, *args) -> str:
-    p = subprocess.run(["git", "-C", str(target), *args], capture_output=True, text=True)
-    return p.stdout.strip() if p.returncode == 0 else ""
+def link_or_copy_file(src: Path, dst: Path):
+    """Link src -> dst using symlink, hardlink, or file copy fallback (Windows-safe)."""
+    if dst.exists() or dst.is_symlink():
+        try:
+            dst.unlink()
+        except OSError:
+            pass
+    # 1. Try symlink
+    try:
+        rel_src = os.path.relpath(src, dst.parent)
+        dst.symlink_to(rel_src)
+        return "symlink"
+    except OSError:
+        pass
+    # 2. Try hardlink (works on Windows without Admin/Developer Mode on same drive)
+    try:
+        os.link(src, dst)
+        return "hardlink"
+    except OSError:
+        pass
+    # 3. Fallback to direct file copy
+    shutil.copy2(src, dst)
+    return "copy"
 
 
-def detect_main_branch(target: Path) -> str:
-    remote_head = git_out(target, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
-    if remote_head:
-        return remote_head.split("/", 1)[1]
-    for name in ("main", "master", "develop"):
-        if git_out(target, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"):
-            return name
-    return git_out(target, "rev-parse", "--abbrev-ref", "HEAD") or "main"
-
-
-def deep_merge(defaults: dict, current: dict) -> dict:
-    out = dict(current)
-    for k, v in defaults.items():
-        if k not in out:
-            out[k] = v
-        elif isinstance(v, dict) and isinstance(out[k], dict):
-            out[k] = deep_merge(v, out[k])
-    return out
-
-
-def upsert_block(path: Path, start: str, end: str, body: str, dry: bool) -> str:
-    block = f"{start}\n{body.rstrip()}\n{end}\n"
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if start in text and end in text:
-        before, rest = text.split(start, 1)
-        after = rest.split(end, 1)[1].lstrip("\n")
-        new = before + block + (("\n" + after) if after else "")
-        action = "updated block"
-    else:
-        new = (text.rstrip() + "\n\n" if text.strip() else "") + block
-        action = "added block" if text else "created"
-    if new == text:
-        return "unchanged"
-    if not dry:
-        path.write_text(new, encoding="utf-8")
-    return action
-
-
-def remove_block(path: Path, start: str, end: str):
-    if not path.exists():
-        return
-    text = path.read_text(encoding="utf-8")
-    if start in text and end in text:
-        before, rest = text.split(start, 1)
-        after = rest.split(end, 1)[1]
-        path.write_text((before.rstrip() + "\n" + after.lstrip("\n")).strip() + "\n", encoding="utf-8")
-
-
-def install(target: Path, force: bool, dry: bool):
-    manifest_path = target / MANIFEST
-    old = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {"files": {}}
-    old_files: dict = old.get("files", {})
-    new_files: dict = {}
-    report = {"added": [], "updated": [], "unchanged": [], "skipped": [], "removed": []}
-
-    for rel in harness_files():
-        src, dst = SRC / rel, target / rel
-        src_hash = sha(src)
-        if not dst.exists():
-            report["added"].append(rel)
-        elif sha(dst) == src_hash:
-            report["unchanged"].append(rel)
-            new_files[rel] = src_hash
-            continue
-        elif rel in old_files and sha(dst) == old_files[rel]:
-            report["updated"].append(rel)
-        elif force:
-            report["updated"].append(rel + "  (FORCED: local changes overwritten, backup .bak)")
-            if not dry:
-                shutil.copy2(dst, dst.with_name(dst.name + ".bak"))
+def link_or_junction_dir(src: Path, dst: Path):
+    """Link directory src -> dst using symlink, NTFS Junction (`mklink /J` on Windows), or copytree fallback."""
+    if dst.exists() or dst.is_symlink():
+        if dst.is_symlink():
+            dst.unlink()
+        elif os.name == "nt":
+            # Remove junction or directory safely on Windows
+            subprocess.run(["cmd", "/c", "rmdir", "/S", "/Q", str(dst)], capture_output=True)
         else:
-            why = "modified locally" if rel in old_files else "exists and is not a harness file"
-            report["skipped"].append(f"{rel}  ({why}; use --force to overwrite)")
-            if rel in old_files:
-                new_files[rel] = old_files[rel]
-            continue
-        new_files[rel] = src_hash
-        if not dry:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            shutil.rmtree(dst, ignore_errors=True)
 
-    # files dropped from the harness since the last install
-    for rel, h in old_files.items():
-        dst = target / rel
-        if rel not in new_files and rel not in harness_files() and dst.exists():
-            if sha(dst) == h:
-                report["removed"].append(rel)
-                if not dry:
-                    dst.unlink()
-            else:
-                report["skipped"].append(f"{rel}  (no longer in harness but modified locally; left in place)")
+    # 1. Try native symlink
+    try:
+        rel_src = os.path.relpath(src, dst.parent)
+        dst.symlink_to(rel_src, target_is_directory=True)
+        return "symlink"
+    except OSError:
+        pass
 
-    # config: create with detected values, or merge new default keys
-    cfg_dst = target / ".sdlc/config.json"
-    defaults = json.loads((SRC / ".sdlc/config.json").read_text(encoding="utf-8"))
-    if cfg_dst.exists():
-        current = json.loads(cfg_dst.read_text(encoding="utf-8"))
-        merged = deep_merge(defaults, current)
-        cfg_action = "merged new default keys" if merged != current else "unchanged"
-    else:
-        merged = defaults
-        merged["project"]["name"] = target.name
-        merged["project"]["workspace"] = "."
-        merged["project"]["tech_stack"] = "auto-detect"
-        merged["project"]["commands"] = {k: "" for k in merged["project"]["commands"]}
-        merged["git"]["main_branch"] = detect_main_branch(target)
-        cfg_action = f"created (main branch: {merged['git']['main_branch']})"
-    if not dry and cfg_action != "unchanged":
-        cfg_dst.parent.mkdir(parents=True, exist_ok=True)
-        cfg_dst.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    # 2. On Windows, try NTFS Directory Junction (`mklink /J` requires zero Admin rights!)
+    if os.name == "nt":
+        res = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(dst), str(src.resolve())],
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode == 0:
+            return "junction (mklink /J)"
 
-    snippet = (SRC / ".sdlc/CLAUDE.snippet.md").read_text(encoding="utf-8")
-    claude_action = upsert_block(target / "CLAUDE.md", CLAUDE_START, CLAUDE_END, snippet, dry)
-    gi_body = ("# SDLC agent harness runtime data (the board is the team's local Jira)\n"
-               ".sdlc/board/\n.sdlc/board-backups/\n.sdlc/**/__pycache__/\n*.bak")
-    gi_action = upsert_block(target / ".gitignore", GITIGNORE_START, GITIGNORE_END, gi_body, dry)
-    # stable line endings across Windows/macOS agents; never touch a project's own attributes
-    ga = target / ".gitattributes"
-    if not ga.exists() or GITIGNORE_START in ga.read_text(encoding="utf-8"):
-        ga_action = upsert_block(ga, GITIGNORE_START, GITIGNORE_END, "* text=auto eol=lf", dry)
-    else:
-        ga_action = "kept (project has its own .gitattributes)"
-
-    if not dry:
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps({"version": VERSION, "files": new_files}, indent=2) + "\n", encoding="utf-8")
-
-    print(f"{'[dry-run] ' if dry else ''}SDLC harness {old.get('version', 'none')} → {VERSION} in {target}")
-    for key in ("added", "updated", "removed", "skipped"):
-        if report[key]:
-            print(f"\n{key} ({len(report[key])}):")
-            print("\n".join(f"  {r}" for r in report[key]))
-    print(f"\nunchanged: {len(report['unchanged'])} files")
-    print(f".sdlc/config.json: {cfg_action}\nCLAUDE.md: {claude_action}\n.gitignore: {gi_action}\n.gitattributes: {ga_action}")
-    if not dry:
-        is_git = bool(git_out(target, "rev-parse", "--git-dir"))
-        print("\nNext steps:")
-        if not is_git:
-            print("  1. python .sdlc/tools/board.py init      # creates the git repo + first commit")
-        else:
-            print("  1. Commit the harness files on your main branch (git add .claude .sdlc CLAUDE.md .gitignore .gitattributes)")
-        print("  2. In Claude Code: /sdlc-init                # onboard the codebase, set test/lint/build commands")
-        print("  3. /sdlc-feature <what you want built>")
-
-
-def uninstall(target: Path, dry: bool):
-    manifest_path = target / MANIFEST
-    if not manifest_path.exists():
-        sys.exit("No .sdlc/manifest.json — harness not installed here.")
-    files = json.loads(manifest_path.read_text(encoding="utf-8"))["files"]
-    kept = []
-    for rel, h in files.items():
-        dst = target / rel
-        if dst.exists() and sha(dst) == h:
-            if not dry:
-                dst.unlink()
-        elif dst.exists():
-            kept.append(rel)
-    if not dry:
-        manifest_path.unlink()
-        remove_block(target / "CLAUDE.md", CLAUDE_START, CLAUDE_END)
-        remove_block(target / ".gitignore", GITIGNORE_START, GITIGNORE_END)
-        if (target / ".gitattributes").exists():
-            remove_block(target / ".gitattributes", GITIGNORE_START, GITIGNORE_END)
-        for d in sorted({(target / r).parent for r in files}, key=lambda p: len(p.parts), reverse=True):
-            if d.exists() and d != target and not any(d.iterdir()):
-                d.rmdir()
-    print(f"{'[dry-run] ' if dry else ''}uninstalled harness files from {target}")
-    print("kept (modified locally): " + (", ".join(kept) if kept else "none"))
-    print("left in place: .sdlc/config.json, .sdlc/board/, .sdlc/project-profile.md (delete manually if unwanted)")
+    # 3. Fallback to directory copy
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    return "copytree"
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("target", help="project folder (new or existing)")
-    ap.add_argument("--force", action="store_true")
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--uninstall", action="store_true")
-    args = ap.parse_args()
-    target = Path(args.target).resolve()
-    if target == SRC:
-        sys.exit("Target is the harness template itself.")
-    if not args.dry_run:
-        target.mkdir(parents=True, exist_ok=True)
-    if args.uninstall:
-        uninstall(target, args.dry_run)
-    else:
-        install(target, args.force, args.dry_run)
+    script_dir = Path(__file__).resolve().parent
+    target_arg = sys.argv[1] if len(sys.argv) > 1 else "."
+    target_dir = Path(target_arg).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"⚡ Installing Lean Parallel SDLC Harness into: {target_dir}")
+    print(f"🖥️  Detected OS: {'Windows (NT)' if os.name == 'nt' else os.uname().sysname}")
+
+    # Copy core files if installing into another directory
+    if script_dir != target_dir:
+        for folder in (".agents", "dashboard", ".sdlc", "requirements"):
+            src_f = script_dir / folder
+            if src_f.exists():
+                shutil.copytree(src_f, target_dir / folder, dirs_exist_ok=True)
+        for fname in (
+            "AGENTS.md",
+            "providers.py",
+            "harness.py",
+            "dashboard.py",
+            "sync_ecc_skills.py",
+            "install.py",
+            "install.ps1",
+            "install.bat",
+            "install.sh",
+        ):
+            src_file = script_dir / fname
+            if src_file.exists():
+                shutil.copy2(src_file, target_dir / fname)
+
+    os.chdir(target_dir)
+
+    # Create required directories
+    for d in (
+        ".claude",
+        ".gemini",
+        ".worktrees",
+        ".sdlc",
+        "requirements/inbox",
+        "requirements/in_progress",
+        "requirements/completed",
+        "requirements/failed",
+    ):
+        Path(d).mkdir(parents=True, exist_ok=True)
+
+    # Link AGENTS.md -> CLAUDE.md and GEMINI.md
+    m1 = link_or_copy_file(Path("AGENTS.md"), Path("CLAUDE.md"))
+    m2 = link_or_copy_file(Path("AGENTS.md"), Path("GEMINI.md"))
+    print(f"  ✓ Linked CLAUDE.md ({m1}) & GEMINI.md ({m2}) -> AGENTS.md")
+
+    # Link .agents/* into .claude/* and .gemini/*
+    for sub in ("skills", "agents", "rules", "commands"):
+        mode = link_or_junction_dir(Path(".agents") / sub, Path(".claude") / sub)
+        print(f"  ✓ Linked .claude/{sub} -> .agents/{sub} ({mode})")
+
+    for sub in ("skills", "commands"):
+        mode = link_or_junction_dir(Path(".agents") / sub, Path(".gemini") / sub)
+        print(f"  ✓ Linked .gemini/{sub} -> .agents/{sub} ({mode})")
+
+    # Update .gitignore
+    gitignore = Path(".gitignore")
+    existing_lines = gitignore.read_text(encoding="utf-8").splitlines() if gitignore.exists() else []
+    for pattern in (".worktrees/", ".sdlc/", "__pycache__/"):
+        if pattern not in existing_lines:
+            existing_lines.append(pattern)
+    gitignore.write_text("\n".join(existing_lines).strip() + "\n", encoding="utf-8")
+
+    # Initialize Git repository if target is a new empty directory
+    res = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True)
+    if res.returncode != 0:
+        print("🌱 Initializing new Git repository on branch 'main'...")
+        subprocess.run(["git", "init", "-b", "main"], check=False)
+
+    res_head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+    if res_head.returncode != 0:
+        print("📝 Creating initial commit so git worktrees can branch cleanly...")
+        subprocess.run(["git", "add", "AGENTS.md", ".gitignore"], check=False)
+        subprocess.run(["git", "commit", "-m", "chore: bootstrap lean sdlc harness"], check=False)
+
+    py_cmd = "python" if os.name == "nt" else "python3"
+    print("\n✅ Lean SDLC Harness v3 (Cross-Platform) installed successfully!")
+    print("------------------------------------------------------------------")
+    print(f"1. Launch the Live Dashboard:       {py_cmd} dashboard.py --port 8765")
+    print("   Open in browser:                 http://localhost:8765")
+    print(f"2. Run Visual Demo (0 Tokens):      {py_cmd} harness.py --demo")
+    print(f"3. Run Local Folder Queue:          {py_cmd} harness.py --from-folder")
+    print(f"4. Watch Folder Continuously:       {py_cmd} harness.py --watch")
+    print("5. Inside Claude/Antigravity Chat:  /sdlc <your requirement>")
+    print("------------------------------------------------------------------")
 
 
 if __name__ == "__main__":

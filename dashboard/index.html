@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDLC Mission Control</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #66707a; --border: #e2e5e9;
+    --accent: #3b6fe0; --ok: #1f8a4c; --warn: #b7791f; --err: #c53030; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1216; --panel: #171b21; --text: #e6e9ed; --muted: #9aa3ad; --border: #2a3038;
+            --accent: #6d95f0; --ok: #4cc283; --warn: #e0b04c; --err: #f07272; --chip: #222831; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+           display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline; }
+  header h1 { font-size: 17px; margin: 0; }
+  header .meta { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+  main { padding: 16px 20px; display: grid; gap: 16px; max-width: 1200px; margin: 0 auto; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .tile { border: 1px solid var(--border); border-radius: 6px; padding: 10px; min-width: 0; }
+  .tile .k { color: var(--muted); font-size: 12px; }
+  .tile .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile .d { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+           background: var(--chip); color: var(--muted); }
+  .s-ok { color: var(--ok); } .s-warn { color: var(--warn); } .s-err { color: var(--err); } .s-run { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td code { font-size: 12px; overflow-wrap: anywhere; }
+  .table-wrap { overflow-x: auto; }
+  .events { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
+  .events li { padding: 6px 0; border-bottom: 1px solid var(--border); display: grid;
+               grid-template-columns: 92px 150px 1fr; gap: 8px; overflow-wrap: anywhere; }
+  .events .t { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .events .a { font-weight: 600; font-size: 12px; }
+  @media (max-width: 640px) {
+    header, main { padding-left: 16px; padding-right: 16px; }
+    .events li { grid-template-columns: 1fr; gap: 2px; }
+  }
+  #conn { margin-left: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SDLC Mission Control</h1>
+  <span class="meta" id="project">–</span>
+  <span class="meta" id="branch"></span>
+  <span class="badge" id="status">–</span>
+  <span id="conn" class="meta">connecting…</span>
+</header>
+<main>
+  <section>
+    <h2>Requirement</h2>
+    <div id="requirement" class="meta">–</div>
+  </section>
+  <section>
+    <h2>Tokens</h2>
+    <div class="grid" id="tokens"></div>
+  </section>
+  <section>
+    <h2>Agents</h2>
+    <div class="grid" id="agents"></div>
+  </section>
+  <section>
+    <h2>Stories</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>ID</th><th>Title</th><th>Runner</th><th>Status</th><th>Files</th><th>Test</th><th>Retries</th><th>Tokens</th></tr></thead>
+        <tbody id="stories"><tr><td colspan="8" class="meta">No stories yet</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+  <section>
+    <h2>Requirements queue</h2>
+    <div class="grid" id="queue"></div>
+  </section>
+  <section>
+    <h2>Events</h2>
+    <ul class="events" id="events"></ul>
+  </section>
+</main>
+<script>
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const num = (n) => (n ?? 0).toLocaleString();
+  function statusClass(s) {
+    s = String(s || "").toUpperCase();
+    if (/(MERGED|COMPLETED|SUCCESS|PASSED)/.test(s)) return "s-ok";
+    if (/(FAILED|ERROR)/.test(s)) return "s-err";
+    if (/(WARN|RETRY)/.test(s)) return "s-warn";
+    if (/(IDLE|PENDING|READY|WAITING)/.test(s)) return "";
+    return "s-run";
+  }
+  const levelClass = (l) => ({ success: "s-ok", warn: "s-warn", error: "s-err" }[l] || "");
+
+  function render(d) {
+    document.getElementById("project").textContent = `${d.project || "–"} · ${d.req_id || ""} · ${d.source || ""} · ${d.mode || ""}`;
+    document.getElementById("branch").textContent = d.feature_branch ? `branch ${d.feature_branch}` : "";
+    const st = document.getElementById("status");
+    st.textContent = d.status || "IDLE";
+    st.className = "badge " + statusClass(d.status);
+    document.getElementById("requirement").textContent = d.requirement || "–";
+
+    const t = d.tokens || {};
+    document.getElementById("tokens").innerHTML = [
+      ["Total", num(t.total), `in ${num(t.input)} · out ${num(t.output)}`],
+      ["Claude", num(t.claude_tokens), ""],
+      ["Antigravity", num(t.antigravity_tokens), ""],
+      ["Est. cost", "$" + (t.estimated_cost_usd ?? 0).toFixed(4), ""],
+      ["Saved vs 8-agent", (t.savings_pct ?? 0) + "%", `${num(t.saved_tokens)} tokens`],
+    ].map(([k, v, dd]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${esc(dd)}</div></div>`).join("");
+
+    const agents = d.active_agents || {};
+    document.getElementById("agents").innerHTML = Object.entries(agents).map(([name, a]) => `
+      <div class="tile">
+        <div class="k">${esc(name)}</div>
+        <div class="v ${statusClass(a.status)}" style="font-size:15px">${esc(a.status)}</div>
+        <div class="d">${a.story ? esc(a.story) + " · " : ""}${esc(a.detail)}</div>
+        <div class="d">${num(a.tokens)} tokens</div>
+      </div>`).join("");
+
+    const stories = d.stories || [];
+    document.getElementById("stories").innerHTML = stories.length ? stories.map((s) => `
+      <tr>
+        <td><code>${esc(s.id)}</code></td>
+        <td>${esc(s.title)}</td>
+        <td>${esc(s.runner)}</td>
+        <td class="${statusClass(s.status)}"><strong>${esc(s.status)}</strong></td>
+        <td>${(s.files_to_modify || []).map((f) => `<code>${esc(f)}</code>`).join("<br>")}</td>
+        <td><code>${esc(s.test_cmd)}</code></td>
+        <td>${num(s.retries)}</td>
+        <td>${num(s.total_tokens)}</td>
+      </tr>`).join("") : `<tr><td colspan="8" class="meta">No stories yet</td></tr>`;
+
+    const q = d.requirements_queue || {};
+    document.getElementById("queue").innerHTML = ["inbox", "in_progress", "completed", "failed"].map((k) => {
+      const items = q[k] || [];
+      return `<div class="tile"><div class="k">${k.replace("_", " ")}</div><div class="v">${items.length}</div>
+        <div class="d">${items.map((i) => esc(i.id + " " + i.title)).join("<br>")}</div></div>`;
+    }).join("");
+
+    document.getElementById("events").innerHTML = (d.events || []).map((e) => `
+      <li><span class="t">${esc(e.time)}</span><span class="a ${levelClass(e.level)}">${esc(e.agent)}</span><span>${esc(e.message)}</span></li>`).join("")
+      || `<li class="meta">No events yet</li>`;
+  }
+
+  async function poll() {
+    const conn = document.getElementById("conn");
+    try {
+      const r = await fetch("/api/telemetry", { cache: "no-store" });
+      render(await r.json());
+      conn.textContent = "live · " + new Date().toLocaleTimeString();
+      conn.className = "meta";
+    } catch (e) {
+      conn.textContent = "disconnected";
+      conn.className = "s-err";
+    }
+  }
+  poll();
+  setInterval(poll, 1500);
+</script>
+</body>
+</html>

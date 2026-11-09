@@ -1,0 +1,115 @@
+{
+  "project": "my-fullstack-app",
+  "req_id": "REQ-101",
+  "requirement": "[REQ-101] Spring Boot Order API + Redis Cache + React Order Table",
+  "source": "folder",
+  "mode": "ready",
+  "status": "READY_TO_RUN",
+  "feature_branch": "feature/req-101",
+  "started_at": "00:00:00 UTC",
+  "updated_at": "Ready",
+  "tokens": {
+    "input": 5060,
+    "output": 2470,
+    "total": 7530,
+    "claude_tokens": 4430,
+    "antigravity_tokens": 3100,
+    "estimated_cost_usd": 0.0522,
+    "traditional_8_agent_estimate": 36144,
+    "saved_tokens": 28614,
+    "savings_pct": 79.2
+  },
+  "active_agents": {
+    "planner": {
+      "status": "IDLE",
+      "story": null,
+      "branch": null,
+      "detail": "Planned 4 parallel stories",
+      "tokens": 1330
+    },
+    "claude": {
+      "status": "IDLE",
+      "story": "STORY-003",
+      "branch": "story/STORY-003",
+      "detail": "Merged STORY-001 & STORY-003",
+      "tokens": 3100
+    },
+    "antigravity": {
+      "status": "IDLE",
+      "story": "STORY-004",
+      "branch": "story/STORY-004",
+      "detail": "Merged STORY-002 & STORY-004",
+      "tokens": 3100
+    },
+    "ci_gate": {
+      "status": "IDLE",
+      "story": null,
+      "branch": null,
+      "detail": "4/4 Test Suites Passed (0 Tok)",
+      "tokens": 0
+    },
+    "reviewer": {
+      "status": "IDLE",
+      "story": null,
+      "branch": null,
+      "detail": "Cross-reviewed 4 git diffs",
+      "tokens": 1520
+    }
+  },
+  "locked_files": [],
+  "stories": [
+    {
+      "id": "STORY-001",
+      "title": "Spring Boot Order Controller, JPA Entity & Postgres Migration",
+      "runner": "claude",
+      "skills": [
+        "springboot-patterns",
+        "jpa-patterns",
+        "springboot-security",
+        "postgres-patterns"
+      ],
+      "files_to_modify": [
+        "backend/src/main/java/com/app/OrderController.java",
+        "backend/src/main/java/com/app/OrderEntity.java",
+        "backend/src/main/resources/db/migration/V1__orders.sql"
+      ],
+      "test_cmd": "mvnw.cmd test -Dtest=OrderControllerTest",
+      "status": "MERGED",
+      "branch": "story/STORY-001",
+      "retries": 0,
+      "input_tokens": 1120,
+      "output_tokens": 640,
+      "total_tokens": 1760
+    },
+    {
+      "id": "STORY-002",
+      "title": "React OrdersTable View, Hook & Component Tests",
+      "runner": "antigravity",
+      "skills": [
+        "frontend-patterns",
+        "frontend-design",
+        "coding-standards"
+      ],
+      "files_to_modify": [
+        "frontend/src/features/orders/OrdersTable.tsx",
+        "frontend/src/features/orders/OrdersTable.test.tsx"
+      ],
+      "test_cmd": "npm test -- OrdersTable.test.tsx",
+      "status": "MERGED",
+      "branch": "story/STORY-002",
+      "retries": 0,
+      "input_tokens": 1050,
+      "output_tokens": 580,
+      "total_tokens": 1630
+    }
+  ],
+  "events": [
+    {
+      "time": "Ready",
+      "agent": "INTAKE",
+      "level": "success",
+      "message": "Cross-Platform v3 ready (Windows PowerShell/CMD + macOS + Linux). Click '\u25b6 Run Demo' or type `/sdlc` in chat!",
+      "tokens": 0
+    }
+  ]
+}
