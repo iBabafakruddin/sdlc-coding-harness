@@ -28,6 +28,13 @@ from providers import (
     RequirementItem,
 )
 
+# Emoji status lines crash on Windows when stdout is piped (cp1252); force UTF-8 output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 MAX_RETRIES = 2
 MAX_WORKERS = int(os.environ.get("SDLC_MAX_WORKERS", "2"))
 
@@ -407,6 +414,39 @@ def extract_json(raw: str) -> dict:
 
 MAX_REVIEW_CHUNK_CHARS = int(os.environ.get("SDLC_REVIEW_CHUNK_CHARS", "60000"))
 
+# Machine-generated lockfiles are still committed, and CHANGED FILES still lists them, but their
+# contents are not sent to the reviewer: a single package-lock.json is ~550 KB (~10 review calls).
+REVIEW_EXCLUDED_FILES = (
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json", "poetry.lock",
+    "Pipfile.lock", "uv.lock", "Cargo.lock", "go.sum", "composer.lock", "Gemfile.lock",
+)
+REVIEW_PATHSPEC = ["--", "."] + [f":(exclude,glob)**/{name}" for name in REVIEW_EXCLUDED_FILES]
+
+FAILURES_DIR = STATE_DIR / "failures"
+
+
+def git_stdout(args: list[str], cwd: Path) -> str:
+    """Run git and return stdout only, so stderr warnings (e.g. CRLF notices) never end up inside a diff."""
+    res = subprocess.run(
+        [resolve_executable("git")] + args, cwd=cwd, capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+    )
+    return res.stdout
+
+
+def save_failure_report(story_id: str, wt_dir: Path, details: str) -> Path:
+    """Keep what a failed story produced (error output + uncommitted code as a patch) before its
+    worktree is removed. Restore the code with `git apply <dir>/changes.patch`."""
+    out = (FAILURES_DIR / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{story_id}").resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "failure.log").write_text(details, encoding="utf-8")
+    if wt_dir.exists():
+        run_cmd(["git", "add", "-N", "."], cwd=wt_dir)
+        patch = git_stdout(["diff", "HEAD", "--binary"], wt_dir)
+        if patch.strip():
+            (out / "changes.patch").write_text(patch, encoding="utf-8", newline="\n")
+    return out
+
 
 def _split_lines(text: str, limit: int) -> list[str]:
     pieces, cur, size = [], [], 0
@@ -537,9 +577,12 @@ def execute_story_live(story: dict, feature_branch: str, tracker: TelemetryTrack
             run_cmd(["git", "add", "-N", "."], cwd=wt_dir)
             # Diff against the worktree's own base commit (HEAD), not the feature branch tip:
             # stories merged meanwhile would otherwise show up as deletions in this diff.
-            _, diff = run_cmd(["git", "diff", "HEAD"], cwd=wt_dir)
-            if not diff.strip():
+            _, changed_files = run_cmd(["git", "diff", "HEAD", "--name-status"], cwd=wt_dir)
+            if not changed_files.strip():
                 raise RuntimeError(f"[{story_id}] Developer made no file modifications.")
+            diff = git_stdout(["diff", "HEAD"] + REVIEW_PATHSPEC, wt_dir)
+            if not diff.strip():
+                diff = "(Only generated lockfiles changed; their contents are excluded from review.)"
 
             reviewer_runner = "antigravity" if runner == "claude" else "claude"
             tracker.update_story(story_id, status="REVIEWING")
@@ -548,7 +591,6 @@ def execute_story_live(story: dict, feature_branch: str, tracker: TelemetryTrack
                 detail=f"{reviewer_runner.upper()} auditing git diff ({len(diff.splitlines())} lines)"
             )
 
-            _, changed_files = run_cmd(["git", "diff", "HEAD", "--name-status"], cwd=wt_dir)
             rev_skills = ["security-review"] + skills[:1]
             rev_skills += [s for s in story.get("baseline_skills", []) if s not in rev_skills]
             approved, review_notes = review_diff(
@@ -582,8 +624,15 @@ def execute_story_live(story: dict, feature_branch: str, tracker: TelemetryTrack
             tracker.log_event("GIT-MERGE", f"[{story_id}] Merged {branch_name} -> {feature_branch}", "success")
             return story_id
 
-        tracker.update_story(story_id, status="FAILED")
         raise RuntimeError(f"[{story_id}] Failed after {MAX_RETRIES} attempts.")
+    except Exception as exc:
+        tracker.update_story(story_id, status="FAILED")
+        report = save_failure_report(story_id, wt_dir, f"{exc}\n\n=== LAST FAILURE OUTPUT ===\n{feedback}")
+        tracker.log_event(
+            "HARNESS", f"[{story_id}] Saved failure output and uncommitted code to {report}", "warn"
+        )
+        tail = f"\n\nLast failure output (tail):\n{feedback[-2000:]}" if feedback else ""
+        raise RuntimeError(f"{exc}\nFull output and code saved to: {report}{tail}") from exc
     finally:
         release_file_locks(target_files + delete_files)
         tracker.set_agent_state(runner, "IDLE", detail="Idle")

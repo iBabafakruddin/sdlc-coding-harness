@@ -16,6 +16,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Emoji status lines crash on Windows when stdout is piped (cp1252); force UTF-8 output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 
 def link_or_copy_file(src: Path, dst: Path):
     """Link src -> dst using symlink, hardlink, or file copy fallback (Windows-safe)."""
@@ -87,10 +94,18 @@ def main():
 
     # Copy core files if installing into another directory
     if script_dir != target_dir:
-        for folder in (".agents", "dashboard", ".sdlc", "requirements"):
+        # .sdlc (this repo's run telemetry) and requirements/ (its queue) are per-project state:
+        # copying them would show a stale run on the dashboard and queue our sample requirements.
+        for folder in (".agents", "dashboard"):
             src_f = script_dir / folder
             if src_f.exists():
                 shutil.copytree(src_f, target_dir / folder, dirs_exist_ok=True)
+        # Sample requirements go to requirements/samples/ so --from-folder never builds them by accident.
+        samples = target_dir / "requirements" / "samples"
+        for src_req in sorted((script_dir / "requirements" / "inbox").glob("*")):
+            if src_req.is_file():
+                samples.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_req, samples / src_req.name)
         for fname in (
             "AGENTS.md",
             "providers.py",
@@ -138,7 +153,9 @@ def main():
     # Update .gitignore
     gitignore = Path(".gitignore")
     existing_lines = gitignore.read_text(encoding="utf-8").splitlines() if gitignore.exists() else []
-    for pattern in (".worktrees/", ".sdlc/", "__pycache__/"):
+    # The harness commits each story with `git add .` after the CI gate ran installs/builds in the
+    # worktree, so dependency and build output dirs must be ignored or they get committed.
+    for pattern in (".worktrees/", ".sdlc/", "__pycache__/", "node_modules/", "target/", "dist/", ".angular/"):
         if pattern not in existing_lines:
             existing_lines.append(pattern)
     gitignore.write_text("\n".join(existing_lines).strip() + "\n", encoding="utf-8")

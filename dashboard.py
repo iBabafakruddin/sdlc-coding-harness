@@ -16,6 +16,13 @@ from urllib.parse import urlparse
 
 from providers import LocalFolderProvider
 
+# Emoji status lines crash on Windows when stdout is piped (cp1252); force UTF-8 output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 TELEMETRY_FILE = Path(".sdlc/telemetry.json")
 DASHBOARD_HTML = Path("dashboard/index.html")
 

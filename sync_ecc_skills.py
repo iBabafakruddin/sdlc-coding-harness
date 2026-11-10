@@ -7,8 +7,16 @@ using Python's `tempfile` and `shutil` (no bash or /tmp dependencies).
 
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+# Emoji status lines crash on Windows when stdout is piped (cp1252); force UTF-8 output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 ECC_REPO = "https://github.com/iBabafakruddin/ECC.git"
 
